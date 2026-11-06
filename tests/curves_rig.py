@@ -259,6 +259,96 @@ def test_motion_paths():
     check("motion_path_clear", ob.motion_path is None)
 
 
+def test_editable_motion_path():
+    from mathutils import Vector
+    from open_anim_easy import curves
+
+    ob = scene()
+    line, points = curves.motion_path_points(bpy.context, ob, None)
+    check(
+        "edit_path_line",
+        len(line) == 10 and line[0][0] == 1 and line[-1][0] == 10,
+        str(len(line)),
+    )
+    check(
+        "edit_path_points",
+        [frame for frame, _pos in points] == [1, 10],
+        str([frame for frame, _pos in points]),
+    )
+    state = curves.motion_capture_state(bpy.context, ob, None, 10)
+    ok = curves.motion_apply_point(
+        bpy.context, ob, None, 10, Vector((0.0, 5.0, 0.0))
+    )
+    fc_x = next(
+        f for f in fcs(ob) if f.data_path == "location" and f.array_index == 0
+    )
+    fc_y = next(
+        f for f in fcs(ob) if f.data_path == "location" and f.array_index == 1
+    )
+    x_at_10 = next(kp.co.y for kp in fc_x.keyframe_points if kp.co.x == 10)
+    y_at_10 = next(kp.co.y for kp in fc_y.keyframe_points if kp.co.x == 10)
+    check(
+        "edit_path_apply",
+        ok and abs(x_at_10) < 1e-4 and abs(y_at_10 - 5.0) < 1e-4,
+        "%s %s" % (x_at_10, y_at_10),
+    )
+    bpy.context.scene.frame_set(10)
+    check(
+        "edit_path_world",
+        (ob.matrix_world.translation - Vector((0.0, 5.0, 0.0))).length < 1e-4,
+        str(ob.matrix_world.translation),
+    )
+    curves.motion_restore_state(bpy.context, ob, None, 10, state)
+    bpy.context.scene.frame_set(10)
+    check(
+        "edit_path_restore",
+        abs(ob.matrix_world.translation.x - 10.0) < 1e-4,
+        str(ob.matrix_world.translation),
+    )
+
+
+def test_editable_motion_path_bone():
+    from mathutils import Vector
+    from open_anim_easy import curves
+
+    bpy.ops.wm.read_factory_settings(use_empty=True)
+    bpy.ops.object.armature_add()
+    arm = bpy.context.object
+    bpy.ops.object.mode_set(mode="POSE")
+    pb = arm.pose.bones[0]
+    pb.location = (0.0, 0.0, 0.0)
+    pb.keyframe_insert("location", frame=1)
+    pb.location = (1.0, 0.0, 0.0)
+    pb.keyframe_insert("location", frame=10)
+    pb.select = True
+    bpy.context.scene.frame_set(1)
+    line, points = curves.motion_path_points(bpy.context, arm, pb)
+    check(
+        "edit_path_bone_points",
+        [frame for frame, _pos in points] == [1, 10],
+        str([frame for frame, _pos in points]),
+    )
+    bpy.context.scene.frame_set(10)
+    original = arm.matrix_world @ pb.head.copy()
+    target = original + Vector((0.0, 0.0, 1.0))
+    state = curves.motion_capture_state(bpy.context, arm, pb, 10)
+    ok = curves.motion_apply_point(bpy.context, arm, pb, 10, target)
+    bpy.context.scene.frame_set(10)
+    check(
+        "edit_path_bone_apply",
+        ok and (arm.matrix_world @ pb.head - target).length < 1e-4,
+        str(arm.matrix_world @ pb.head),
+    )
+    curves.motion_restore_state(bpy.context, arm, pb, 10, state)
+    bpy.context.scene.frame_set(10)
+    check(
+        "edit_path_bone_restore",
+        (arm.matrix_world @ pb.head - original).length < 1e-4,
+        str(arm.matrix_world @ pb.head),
+    )
+    bpy.ops.object.mode_set(mode="OBJECT")
+
+
 def main():
     for name, func in [
         ("delete_crop", test_delete_crop),
@@ -272,6 +362,8 @@ def main():
         ("childof_toggle_bake", test_childof_toggle_bake),
         ("space", test_space),
         ("motion_paths", test_motion_paths),
+        ("editable_motion_path", test_editable_motion_path),
+        ("editable_motion_path_bone", test_editable_motion_path_bone),
     ]:
         run(name, func)
     print("SUMMARY pass=%d fail=%d" % (len(PASS), len(FAIL)))

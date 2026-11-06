@@ -3,6 +3,12 @@
 import math
 
 import bpy
+from bpy_extras.view3d_utils import (
+    location_3d_to_region_2d,
+    region_2d_to_origin_3d,
+    region_2d_to_vector_3d,
+)
+from mathutils import Vector
 
 from . import core
 
@@ -401,6 +407,336 @@ class OPENANIM_OT_motion_paths(bpy.types.Operator):
                     except Exception:
                         pass
         return {"FINISHED"}
+
+
+# --------------------------------------------------------------------------
+# Editable 3D motion path
+# --------------------------------------------------------------------------
+
+_EDIT = {"handler": None, "points": [], "line": [], "active": -1, "size": 0.05}
+
+
+def motion_target(context):
+    ob = context.object
+    if not ob:
+        return None, None
+    return ob, core.active_bone(context)
+
+
+def motion_world_position(ob, pb):
+    if pb is not None:
+        return ob.matrix_world @ pb.head
+    return ob.matrix_world.translation.copy()
+
+
+def _location_data_path(pb):
+    return 'pose.bones["%s"].location' % pb.name if pb else "location"
+
+
+def motion_location_frames(context, ob, pb):
+    """Frames that have location keys for the object or pose bone."""
+    path = _location_data_path(pb)
+    frames = set()
+    action = core.action_of(ob)
+    if action:
+        for fc in core.action_fcurves(action, core.slot_of(ob, action)):
+            if fc.data_path == path:
+                frames.update(int(round(kp.co.x)) for kp in fc.keyframe_points)
+    return sorted(frames or {context.scene.frame_current})
+
+
+def _sample_position(context, ob, pb, frame):
+    scene = context.scene
+    current = scene.frame_current
+    scene.frame_set(int(frame))
+    position = motion_world_position(ob, pb)
+    scene.frame_set(current)
+    return position
+
+
+def motion_path_line(context, ob, pb):
+    """World-space trajectory sampled over the animation range."""
+    start, end = core.smart_range(context)
+    start, end = int(start), int(end)
+    step = max(1, (end - start) // 1000 + 1)
+    scene = context.scene
+    current = scene.frame_current
+    line = []
+    try:
+        for frame in range(start, end + 1, step):
+            scene.frame_set(frame)
+            line.append((frame, motion_world_position(ob, pb).copy()))
+    finally:
+        scene.frame_set(current)
+    return line
+
+
+def motion_path_points(context, ob, pb):
+    """(frame, world position) for every editable location key."""
+    line = motion_path_line(context, ob, pb)
+    positions = dict(line)
+    points = []
+    for frame in motion_location_frames(context, ob, pb):
+        position = positions.get(frame)
+        if position is None:
+            position = _sample_position(context, ob, pb, frame)
+        points.append((frame, position.copy()))
+    return line, points
+
+
+def _has_location_key(context, ob, pb, frame):
+    path = _location_data_path(pb)
+    action = core.action_of(ob)
+    if not action:
+        return False
+    for fc in core.action_fcurves(action, core.slot_of(ob, action)):
+        if fc.data_path == path and any(
+            abs(kp.co.x - frame) < 1e-4 for kp in fc.keyframe_points
+        ):
+            return True
+    return False
+
+
+def motion_capture_state(context, ob, pb, frame):
+    """Location and key presence at frame, for cancelling an edit."""
+    context.scene.frame_set(int(frame))
+    return {
+        "location": (pb.location if pb else ob.location).copy(),
+        "key": _has_location_key(context, ob, pb, frame),
+    }
+
+
+def motion_restore_state(context, ob, pb, frame, state):
+    context.scene.frame_set(int(frame))
+    target = pb or ob
+    target.location = state["location"]
+    if state["key"]:
+        target.keyframe_insert("location", frame=frame)
+    else:
+        target.keyframe_delete("location", frame=frame)
+
+
+def motion_apply_point(context, ob, pb, frame, position):
+    """Move an object or pose bone to a world position and key it."""
+    context.scene.frame_set(int(frame))
+    if pb is not None:
+        if pb.bone.use_connect:
+            return False
+        matrix = pb.matrix.copy()
+        matrix.translation = ob.matrix_world.inverted() @ position
+        pb.matrix = matrix
+        pb.keyframe_insert("location", frame=frame)
+    else:
+        matrix = ob.matrix_world.copy()
+        matrix.translation = position
+        ob.matrix_world = matrix
+        ob.keyframe_insert("location", frame=frame)
+    return True
+
+
+def _draw_motion_path():
+    points = _EDIT["points"]
+    if not points:
+        return
+    try:
+        import gpu
+        from gpu_extras.batch import batch_for_shader
+
+        shader = gpu.shader.from_builtin("UNIFORM_COLOR")
+        size = _EDIT.get("size", 0.05)
+        line = _EDIT["line"]
+        if len(line) > 1:
+            batch = batch_for_shader(
+                shader, "LINE_STRIP", {"pos": [p for _f, p in line]}
+            )
+            shader.bind()
+            shader.uniform_float("color", (1.0, 0.55, 0.1, 0.85))
+            batch.draw(shader)
+        active = _EDIT.get("active", -1)
+        idle, hot = [], []
+        for index, (_frame, position) in enumerate(points):
+            scale = size * (1.6 if index == active else 1.0)
+            target = hot if index == active else idle
+            for axis in (Vector((1, 0, 0)), Vector((0, 1, 0)), Vector((0, 0, 1))):
+                target.extend((position + axis * scale, position - axis * scale))
+        for coords, color in (
+            (idle, (1.0, 0.85, 0.25, 1.0)),
+            (hot, (1.0, 1.0, 1.0, 1.0)),
+        ):
+            if not coords:
+                continue
+            batch = batch_for_shader(shader, "LINES", {"pos": coords})
+            shader.bind()
+            shader.uniform_float("color", color)
+            batch.draw(shader)
+    except Exception:
+        pass
+
+
+class OPENANIM_OT_edit_motion_path(bpy.types.Operator):
+    bl_idname = "openanim.edit_motion_path"
+    bl_label = "Edit Motion Path"
+    bl_description = (
+        "Drag motion path points in the 3D Viewport to edit location keys"
+    )
+    bl_options = {"REGISTER", "UNDO"}
+
+    def _redraw(self, context):
+        for area in context.window.screen.areas:
+            if area.type == "VIEW_3D":
+                area.tag_redraw()
+
+    def _refresh(self, context):
+        line, points = motion_path_points(context, self._ob, self._pb)
+        _EDIT["line"] = line
+        _EDIT["points"] = points
+        _EDIT["active"] = -1
+        extent = 0.0
+        if len(line) > 1:
+            first = line[0][1]
+            extent = max((position - first).length for _f, position in line)
+        _EDIT["size"] = max(0.01, extent * 0.01)
+        self._redraw(context)
+
+    def _point_at(self, event):
+        best, best_distance = -1, 14.0
+        mouse = Vector(
+            (event.mouse_x - self._region.x, event.mouse_y - self._region.y)
+        )
+        for index, (_frame, position) in enumerate(_EDIT["points"]):
+            co = location_3d_to_region_2d(self._region, self._rv3d, position)
+            if co is None:
+                continue
+            distance = (co - mouse).length
+            if distance < best_distance:
+                best, best_distance = index, distance
+        return best
+
+    def _world_on_plane(self, event):
+        mouse = (event.mouse_x - self._region.x, event.mouse_y - self._region.y)
+        origin = region_2d_to_origin_3d(self._region, self._rv3d, mouse)
+        direction = region_2d_to_vector_3d(self._region, self._rv3d, mouse)
+        denominator = direction.dot(self._plane_normal)
+        if abs(denominator) < 1e-6:
+            return None
+        distance = (
+            (self._plane_point - origin).dot(self._plane_normal) / denominator
+        )
+        return origin + direction * distance
+
+    def _finish(self, context, cancelled):
+        if cancelled:
+            for frame, state in self._originals.items():
+                motion_restore_state(context, self._ob, self._pb, frame, state)
+        if _EDIT["handler"] is not None:
+            try:
+                bpy.types.SpaceView3D.draw_handler_remove(
+                    _EDIT["handler"], "WINDOW"
+                )
+            except Exception:
+                pass
+        _EDIT.update(handler=None, points=[], line=[], active=-1)
+        try:
+            context.workspace.status_text_set(None)
+        except Exception:
+            pass
+        self._redraw(context)
+        return {"CANCELLED" if cancelled else "FINISHED"}
+
+    def invoke(self, context, event):
+        ob, pb = motion_target(context)
+        if ob is None:
+            self.report({"WARNING"}, "Select an object or bone")
+            return {"CANCELLED"}
+        if pb is not None and pb.bone.use_connect:
+            self.report(
+                {"WARNING"},
+                "Connected bones cannot translate; edit the parent bone instead",
+            )
+            return {"CANCELLED"}
+        area = context.area
+        if area is None or area.type != "VIEW_3D":
+            area = core.find_editor(context, {"VIEW_3D"})
+        region = (
+            next((r for r in area.regions if r.type == "WINDOW"), None)
+            if area
+            else None
+        )
+        if region is None or area.spaces.active.region_3d is None:
+            self.report({"WARNING"}, "Run this from the 3D Viewport")
+            return {"CANCELLED"}
+        self._ob = ob
+        self._pb = pb
+        self._region = region
+        self._rv3d = area.spaces.active.region_3d
+        self._drag = -1
+        self._originals = {}
+        self._plane_point = Vector((0, 0, 0))
+        self._plane_normal = self._rv3d.view_rotation @ Vector((0, 0, -1))
+        if _EDIT["handler"] is not None:
+            try:
+                bpy.types.SpaceView3D.draw_handler_remove(
+                    _EDIT["handler"], "WINDOW"
+                )
+            except Exception:
+                pass
+        _EDIT["handler"] = bpy.types.SpaceView3D.draw_handler_add(
+            _draw_motion_path, (), "WINDOW", "POST_VIEW"
+        )
+        self._refresh(context)
+        try:
+            context.workspace.status_text_set(
+                "Drag a point to edit its location key  |  Enter/RMB: finish  |  Esc: cancel"
+            )
+        except Exception:
+            pass
+        context.window_manager.modal_handler_add(self)
+        return {"RUNNING_MODAL"}
+
+    def modal(self, context, event):
+        if event.type == "MOUSEMOVE":
+            if self._drag >= 0:
+                world = self._world_on_plane(event)
+                frame = _EDIT["points"][self._drag][0]
+                if world is not None and motion_apply_point(
+                    context, self._ob, self._pb, frame, world
+                ):
+                    _EDIT["points"][self._drag] = (frame, world.copy())
+                    self._redraw(context)
+            else:
+                index = self._point_at(event)
+                if index != _EDIT["active"]:
+                    _EDIT["active"] = index
+                    self._redraw(context)
+            return {"RUNNING_MODAL"}
+        if event.type == "LEFTMOUSE" and event.value == "PRESS":
+            index = self._point_at(event)
+            if index >= 0:
+                self._drag = index
+                frame, position = _EDIT["points"][index]
+                self._plane_point = position.copy()
+                self._plane_normal = self._rv3d.view_rotation @ Vector((0, 0, -1))
+                if int(frame) not in self._originals:
+                    self._originals[int(frame)] = motion_capture_state(
+                        context, self._ob, self._pb, frame
+                    )
+                _EDIT["active"] = index
+                self._redraw(context)
+            return {"RUNNING_MODAL"}
+        if event.type == "LEFTMOUSE" and event.value == "RELEASE":
+            if self._drag >= 0:
+                self._drag = -1
+                self._refresh(context)
+            return {"RUNNING_MODAL"}
+        if event.type == "ESC":
+            return self._finish(context, cancelled=True)
+        if event.type in {"RET", "NUMPAD_ENTER", "RIGHTMOUSE"}:
+            return self._finish(context, cancelled=False)
+        return {"RUNNING_MODAL"}
+
+    def execute(self, context):
+        self.report({"WARNING"}, "Run this from the 3D Viewport")
+        return {"CANCELLED"}
 
 
 # --------------------------------------------------------------------------
@@ -828,6 +1164,7 @@ CLASSES = (
     OPENANIM_OT_blend,
     OPENANIM_OT_ghost,
     OPENANIM_OT_motion_paths,
+    OPENANIM_OT_edit_motion_path,
     OPENANIM_OT_clean_curves,
     OPENANIM_OT_value_op,
     OPENANIM_OT_copy_keys,
@@ -842,5 +1179,11 @@ def register():
 
 
 def unregister():
+    if _EDIT["handler"] is not None:
+        try:
+            bpy.types.SpaceView3D.draw_handler_remove(_EDIT["handler"], "WINDOW")
+        except Exception:
+            pass
+        _EDIT["handler"] = None
     for cls in reversed(CLASSES):
         bpy.utils.unregister_class(cls)

@@ -229,6 +229,12 @@ class OPENANIM_MT_motion(bpy.types.Menu):
         col.operator("openanim.motion_paths", text="Show Motion Paths").action = "SHOW"
         col.operator("openanim.motion_paths", text="Update All Motion Paths").action = "UPDATE"
         col.operator("openanim.motion_paths", text="Clear All Motion Paths").action = "CLEAR"
+        col.separator()
+        col.operator(
+            "openanim.edit_motion_path",
+            text="Edit Motion Path (Drag)",
+            icon="CURVE_PATH",
+        )
 
 
 class OPENANIM_MT_root(bpy.types.Menu):
@@ -372,6 +378,11 @@ def draw_main(layout, context):
         box.menu("OPENANIM_MT_childof", text="Child Of", icon="CONSTRAINT")
         box.menu("OPENANIM_MT_space", text="Space Conversion", icon="WORLD")
         box.menu("OPENANIM_MT_motion", text="Motion Paths", icon="CURVE_PATH")
+        box.operator(
+            "openanim.edit_motion_path",
+            text="Edit Motion Path (Drag)",
+            icon="CURVE_PATH",
+        )
 
     if prefs.show_library:
         box = layout.box()
@@ -432,6 +443,11 @@ class OPENANIM_PT_view3d(bpy.types.Panel):
         box.menu("OPENANIM_MT_childof", text="Child Of", icon="CONSTRAINT")
         box.menu("OPENANIM_MT_space", text="Space Conversion", icon="WORLD")
         box.menu("OPENANIM_MT_motion", text="Motion Paths", icon="CURVE_PATH")
+        box.operator(
+            "openanim.edit_motion_path",
+            text="Edit Motion Path (Drag)",
+            icon="CURVE_PATH",
+        )
 
 
 MENUS = (

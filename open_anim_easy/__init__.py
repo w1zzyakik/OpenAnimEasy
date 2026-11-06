@@ -1,7 +1,7 @@
 bl_info = {
     "name": "OpenAnimEasy",
     "author": "OpenAnimEasy contributors",
-    "version": (0, 1, 0),
+    "version": (0, 2, 0),
     "blender": (4, 4, 0),
     "location": "Animation editor header > OpenAnimEasy, sidebar > AnimEasy",
     "description": "Free and open-source animation workflow tools for Blender",
