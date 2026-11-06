@@ -16,6 +16,7 @@
 
 1. `Edit > Preferences > Add-ons > Install...`
 2. Выберите `OpenAnimEasy-0.1.0.zip` (внутри архива папка `open_anim_easy/`).
+   Готовый архив: [Releases](https://github.com/w1zzyakik/OpenAnimEasy/releases/latest).
 3. Включите галочку **Animation: OpenAnimEasy**.
 
 ### Вручную
